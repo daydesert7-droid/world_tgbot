@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sqlite3
 import time
@@ -7,7 +8,6 @@ import datetime
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from logging.handlers import RotatingFileHandler
-
 
 TOKEN = "8132501492:AAFgd3ja9Tre30XQTg5BEiyR7qOyxJ-XZw0"
 CREATOR_ID = "2037455253"
@@ -93,7 +93,7 @@ class BotMonitor:
             # Архивируем текущий основной лог если он больше 1MB
             main_log_path = 'logs/bot_main.log'
             if os.path.exists(main_log_path) and os.path.getsize(main_log_path) > 1024*1024:
-                archive_name = f"logs/archive/bot_main_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+                archive_name = f"logs/archive/bot_main_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
                 os.rename(main_log_path, archive_name)
                 bot_logger.info(f"Основной лог заархивирован: {archive_name}")
 
@@ -124,25 +124,25 @@ class BotMonitor:
 # Глобальный монитор
 monitor = BotMonitor()
 
-def schedule_cleanup():
-    """Планировщик очистки логов"""
+async def schedule_cleanup():
+    """Асинхронный планировщик очистки логов"""
     while monitor.running:
         try:
             current_time = time.time()
 
             # Проверяем нужно ли очистить логи
             if current_time - monitor.last_cleanup > (LOG_CLEANUP_HOURS * 3600):
-                monitor.cleanup_old_logs()
+                await asyncio.to_thread(monitor.cleanup_old_logs)
 
             # Отправляем heartbeat
             if current_time - monitor.last_heartbeat > HEARTBEAT_INTERVAL:
-                monitor.send_heartbeat()
+                await asyncio.to_thread(monitor.send_heartbeat)
 
-            time.sleep(60)  # Проверяем каждую минуту
+            await asyncio.sleep(60)  # Проверяем каждую минуту
 
         except Exception as e:
             bot_logger.error(f"Ошибка в планировщике: {e}")
-            time.sleep(300)
+            await asyncio.sleep(300)
 
 def format_time_remaining(hours, minutes):
     if hours > 0:
@@ -305,32 +305,44 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
         )
 
     except Exception as e:
-        await update.message.reply_text("Произошла ошибка.")
+        bot_logger.error(f"Ошибка при отправке сообщения создателю: {e}")
+        await update.message.reply_text("Произошла ошибка при обработке сообщения.")
 
 async def handle_unsupported_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Принимаются только текстовые сообщения.")
 
+async def post_init(application: Application):
+    """Функция инициализации после запуска бота"""
+    # Запускаем фоновую задачу для очистки логов
+    asyncio.create_task(schedule_cleanup())
+
 def main():
+    # Инициализация базы данных
+    init_database()
+    
     conn = sqlite3.connect('user_limits.db')
     cursor = conn.cursor()
     cursor.execute('PRAGMA optimize')  # Оптимизация БД
     conn.close()
-    init_database()
 
-    application = Application.builder().token(TOKEN).build()
+    # Создание Application с обработчиком post_init
+    application = Application.builder()\
+        .token(TOKEN)\
+        .post_init(post_init)\
+        .build()
 
+    # Добавление обработчиков
     application.add_handler(CommandHandler("start", start))
-
     application.add_handler(MessageHandler(
         filters.TEXT & ~filters.COMMAND,
         handle_text_message
     ))
-
     application.add_handler(MessageHandler(
         ~filters.TEXT & ~filters.COMMAND,
         handle_unsupported_message
     ))
 
+    # Запуск бота
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
